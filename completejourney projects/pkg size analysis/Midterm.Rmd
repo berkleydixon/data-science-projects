@@ -1,0 +1,644 @@
+---
+title: "Product Pricing and Purchase Behavior"
+author: "Berkley Dixon"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# {.tabset}
+## Introduction 
+
+When it comes to grocery stores, there are plenty of different ways to differentiate oneself. Big box stores sell mostly bulk products, while health food stores sell smaller, more expensive products. Most stores, such as Regork, stay somewhere in the middle. Are there certain places where Regork could change its approach to product sizing and pricing in order to better meet its customers' needs and maximize profits? That's our business question today: how does product sizing and pricing per unit affect buyer interest? 
+
+We addressed this problem using some CompleteJourney datasets--specifically, products, transactions, and demographics. Using these, we could examine the distribution of products' pricing, purchases of products based on pricing, and demographic preferences.
+
+Generally, lower price-per-unit products are sold in higher quantities than higher price-per-unit products, which indicates a preference for these lower-priced products. However, in some cases, focusing on certain mid-range and more expensive products will help increase sales more because of their high average sales values. We propose an increase in lower price-per-unit products measured by count and ounces and increases in mid-range price-per-unit products measured in pounds. Before doing this, though, more product category-specific analysis needs to be performed.
+
+
+## Packages/Libraries Required
+
+The following are packages used in the data analysis:
+
+```{r, message = FALSE}
+library(tidyr) # helps tidy data
+library(dplyr) # used for dataframe manipulation 
+library(ggplot2) # used to create plots and visualizations
+library(completejourney) # provides datasets needed to analyze
+library(stringr) # allows for string manipulation for tidying data
+library(tidyverse)
+```
+
+## Data Preparation
+
+We will be using multiple datasets from the Complete Journey package:
+
+```{r} 
+# get transaction data
+transactions <- get_transactions()
+
+# products data
+products
+
+# demographics data
+demographics
+```
+
+Next, because we will be performing analysis based on package size, we need to tidy the products data:
+
+```{r, warning = FALSE}
+# separating package_size into numerical value and unit
+filtered_products <- products %>%
+  filter(package_size != "NA") %>%
+  separate(col = package_size, into = c("package_size", "unit"), sep = " ")
+
+# coercing package_size to numerics to prepare for quantitative analysis
+filtered_products <- mutate(filtered_products, package_size = as.numeric(filtered_products$package_size))
+
+# checking for which units are the most common
+filtered_products %>%
+  group_by(unit) %>%
+  count(unit) %>%
+  summarize(total = sum(n)) %>%
+  arrange(desc(total))
+
+```
+
+Looking at the tibble above, three units make up a large amount of the products avaiable. They are ounces, count, and pounds. We'll analyze these three. Now, we will make dataframes for these specific units. 
+
+```{r}
+# products measured in ounces
+products_oz <- filtered_products %>%
+  filter(unit  == "OZ")
+products_oz
+
+# products measured by quantity "ct"
+products_ct <- filtered_products %>%
+  filter(str_detect(unit, "CT"))
+products_ct
+
+# products measured in pounds
+products_lb <- filtered_products %>%
+  filter(unit == "LB") 
+products_lb
+
+# setting up empty datafame for some later manipulation
+avg_prices <- ""
+```
+
+
+## Exploratory Data Analysis {.tabset}
+
+### Establishing Functions
+
+Now we are ready to do some analysis! First, let's make some functions for making our common graphs.
+  
+```{r}
+# function to create an overall histogram based on package unit
+create_unit_histogram <- function(products_unit, unit = "", max_price = 100000, color = "darksalmon"){
+  products_unit %>%
+    inner_join(transactions) %>%
+    group_by(package_size) %>%
+    mutate(price_per_unit = (sales_value / package_size / quantity)) %>%
+    group_by(product_id) %>%
+    mutate(avg_ppu = mean(price_per_unit)) %>%
+    filter(avg_ppu < max_price) %>%
+    inner_join(demographics) %>%
+    ggplot(aes(x = avg_ppu)) +
+    geom_histogram(fill = color)
+}
+
+# function to create a boxplot based on package unit
+create_unit_boxplot <- function(products_unit, color = "orange"){
+ products_unit %>%
+  inner_join(transactions) %>%
+  filter(quantity != 0) %>%
+  group_by(product_id) %>%
+  mutate(price_per_unit = (sales_value / package_size / quantity)) %>%
+  summarize(avg_price_per_unit = mean(price_per_unit, na.rm = TRUE)) %>%
+  ggplot(aes(x = avg_price_per_unit)) +
+  geom_boxplot(fill = color)
+}
+
+# function to find quantile values for products' average price per unit, based on package unit
+find_unit_quantiles <- function(products_unit){
+  products_unit %>%
+  inner_join(transactions) %>%
+  filter(quantity != 0) %>%
+  group_by(product_id) %>%
+  mutate(price_per_unit = (sales_value / package_size / quantity)) %>%
+  summarize(avg_price_per_unit = mean(price_per_unit, na.rm = TRUE)) %>%
+  summarize(quantile = quantile(avg_price_per_unit, na.rm = TRUE))
+}
+
+# function to create a scatter plot with a trend line for average sales value versus price per unit
+create_avg_sv_scatter <- function(products_unit, max_price = 10000){
+  products_unit %>%
+  inner_join(transactions) %>%
+  mutate(price_per_unit = (sales_value / quantity / package_size)) %>%
+  group_by(product_id) %>%
+  mutate(avg_ppunit = mean(price_per_unit)) %>%
+  filter(avg_ppunit < max_price) %>%
+  group_by(avg_ppunit, product_id) %>%
+  mutate(avg_sales_value = mean(sales_value)) %>%
+  ggplot(aes(x = avg_ppunit, y = avg_sales_value)) +
+  geom_point(alpha = 0.05) +
+  geom_smooth()
+}
+
+# function to create a scatter plot with a trend line for total sales value based on price per unit
+create_total_sv_scatter <- function(products_unit, max_price = 10000){
+  products_unit %>%
+  inner_join(transactions) %>%
+  mutate(price_per_unit = (sales_value / quantity / package_size)) %>%
+  group_by(product_id) %>%
+  mutate(avg_ppunit = mean(price_per_unit)) %>%
+  filter(avg_ppunit <= max_price) %>%
+  group_by(avg_ppunit, product_id) %>%
+  mutate(total_sales = sum(sales_value)) %>%
+  filter(total_sales < 1500) %>%
+  ggplot(aes(x = avg_ppunit, y = total_sales)) +
+  geom_point(alpha = 0.05) +
+  geom_smooth()
+}
+
+# function to create scatter plot for number of products for each price per unit
+create_products_scatter <- function(products_unit, max_price = 1000000){
+  products_unit %>%
+  inner_join(transactions) %>%
+  mutate(price_per_unit = (sales_value / quantity / package_size)) %>%
+  filter(price_per_unit <= 0.5) %>%
+  ggplot(aes(x = price_per_unit, y = quantity)) +
+  geom_point(alpha = 0.05)
+}
+
+## same functions as above but filtering for specific product type(s)
+create_category_histogram <- function(products_unit, category = ".", max_price = 10000, bin_count = 20, color = "violet") {
+  products_unit %>%
+    filter(str_detect(product_category, regex(category))) %>%
+    inner_join(transactions) %>%
+    group_by(package_size) %>%
+    mutate(price_per_unit = sales_value / package_size / quantity) %>%
+    group_by(product_id) %>%
+    mutate(avg_ppu = mean(price_per_unit)) %>%
+    filter(avg_ppu < max_price) %>%
+    inner_join(demographics) %>%
+      ggplot(aes(x = avg_ppu)) +
+      geom_histogram(bins = bin_count, fill = color)
+}
+
+create_category_boxplot <- function(products_unit, category, color = "yellow"){
+ products_unit %>%
+   filter(str_detect(product_category, regex(category))) %>%
+   inner_join(transactions) %>%
+   filter(quantity != 0) %>%
+   group_by(product_id) %>%
+   mutate(price_per_unit = (sales_value / package_size / quantity)) %>%
+   summarize(avg_price_per_unit = mean(price_per_unit, na.rm = TRUE)) %>%
+    ggplot(aes(x = avg_price_per_unit)) +
+    geom_boxplot(fill = color)
+}
+
+
+find_category_quantiles <- function(products_unit, category){
+  products_unit %>%
+  filter(str_detect(product_category, regex(category))) %>%
+  inner_join(transactions) %>%
+  filter(quantity != 0) %>%
+  group_by(product_id) %>%
+  mutate(price_per_unit = (sales_value / package_size / quantity)) %>%
+  summarize(avg_price_per_unit = mean(price_per_unit, na.rm = TRUE)) %>%
+  summarize(quantile = quantile(avg_price_per_unit, na.rm = TRUE))
+}
+
+
+
+
+```
+
+### Count
+
+First, let's analyze the products with the "count" unit. To get a general idea of the overall distribution, we'll first look at a unit histogram:
+
+```{r, message = FALSE}
+create_unit_histogram(products_ct, unit = ct) +
+  labs(title = "Amount of Products Purchased by Price per Count",
+       x  = "Price per Count ($)",
+       y = "Total Quantity of Product Purchased"
+       )
+```
+
+This distribution is quite skewed, with most of the purchases being from products with a price per count (ppc) less than $3. Let's do some analysis to find a price that will give us a better range of prices to look at. We'll do this by first finding the price per count for each transaction, and then finding an average price per count for each product. Then, we'll create a boxplot using those numbers. To see the details of the code, look back at the "Establishing Functions" section at the "create_unit_boxplot" function.
+
+```{r, warning = FALSE}
+create_unit_boxplot(products_ct, color = "darksalmon") +
+  labs(title = "Distribution of Products' Price Per Count", 
+       x = "Price Per Count ($)")
+```
+
+The story this boxplot tells is clearer than that of the histogram. Most of the products, it seems, have a price per count below $1. Let's get some clear quantile numbers. To see the code for finding quantile numbers, look at the "Establishing Functions" section at the "find_unit_quantiles" function.
+
+```{r}
+find_unit_quantiles(products_ct)
+```
+
+It looks like our third quantile is $0.498, which makes sense with that earlier guess of price per count being below one dollar. Let's make a new histogram using the third quantile, which will show us a distribution based on 75% of products.
+
+```{r, message = FALSE}
+create_unit_histogram(products_ct, "ct", 0.498) +
+  labs(title = "Quantity of Products Purchased by Price Per Count",
+       x = "Price Per Count ($)",
+       y = "Quantity of Products Purchased")
+```
+
+Interesting. Even though 75% of products measured by count have a price per count below $0.50, a majority of purchases are way further below that. This indicates that, for products measured by count, people prefer to purchase products with lower prices per count. Let's see if there's any differences based on income or household size:
+
+```{r, message = FALSE}
+create_unit_histogram(products_ct, "ct", 0.498) +
+  labs(title = "Quantity of Products Purchased by Price Per Count",
+       subtitle = "Separated by Income Range",
+       x = "Price Per Count ($)",
+       y = "Quantity of Products Purchased") +
+  facet_wrap(~income)
+```
+
+```{r, message = FALSE}
+create_unit_histogram(products_ct, "ct", 0.498) +
+  labs(title = "Quantity of Products Purchased by Price Per Count",
+       subtitle = "Separated by Household Size",
+       x = "Price Per Count ($)",
+       y = "Quantity of Products Purchased") +
+  facet_wrap(~ household_size)
+```
+
+There does not appear to be any differences based on demographics that could not be reasonably explained by differing amounts of households between sections. Thus, we can generally say that people prefer to purchase products with lower prices per count. 
+
+Are customers spending more or less money overall by purchasing these lower price-per-count products? Let's find the average sales value of products based on prices per unit.
+
+```{r, message = FALSE}
+create_avg_sv_scatter(products_ct, 0.498) +
+  labs(title = "Average Sales Value by Price Per Count",
+       x = "Price Per Count ($)", 
+       y = "Average Sales Value ($)")
+```
+
+Generally speaking, it seems like there's a slightly larger average sales value for "more expensive" products, but it also shows that there are way fewer of these products, as shown by the opacity. Let's look at the total sales value by price per count to see if there's any more conclusions we can draw.
+
+```{r, message = FALSE}
+create_total_sv_scatter(products_ct, 0.498) +
+  labs(title = "Total Sales Value by Price Per Count",
+       x = "Price Per Count ($)",
+       y = "Total Sales Value ($)")
+```
+
+Looking at this graph, there's a few outliers, but the general trend shows a decreasing/leveling off total sales value as price per count increases, which corroborates our idea that lower price per count leads to more purchases by customers. Finally, let's look at quantity of products per price per count.
+
+```{r, message = FALSE}
+create_products_scatter(products_ct, 0.498) +
+  labs(title = "Quantity of Products for Each Price per Ounce",
+       x = "Price Per Ounce ($)", 
+       y = "Quantity of Products")
+```
+
+There's a similar amount of products for each price per count, which means the total sales and average sales for each price per count isn't heavily affected by the number of products that are at each price per count.
+
+
+Customers seem to greatly prefer the lower price per count products, as shown by the very large amount of lower price per count products purchased coupled with the relatively similar average sales values of products measured by count. 
+
+### Pounds
+
+Analyzing the products measured in pounds will be similar to analyzing products measured by count. Let's look at the overall histogram.
+
+```{r, message = FALSE}
+create_unit_histogram(products_lb, unit = lb, color = "brown1") +
+  labs(title = "Amount of Products Purchased by Price per Pound",
+       x  = "Price per Pound ($)",
+       y = "Total Quantity of Product Purchased"
+       )
+```
+
+Looking at this distribution, there are very clearly some extreme outliers in this dataset. Let's make another boxplot.
+
+```{r, warning = FALSE}
+create_unit_boxplot(products_lb, color = "brown1") +
+  labs(title = "Distribution of Products' Prices Per Pound",
+       x = "Price Per Pound ($)")
+```
+
+Interesting. Almost all of the products have an average price per pound less than $15, but there's a few significant outliers that are making our data so skewed. Let's look at the actual numbers for this boxplot.
+
+```{r}
+find_unit_quantiles(products_lb)
+```
+
+This gives us a much better idea of what range most of the products are in. Let's make a new histogram, using the 3rd quantile as our maximum price:
+
+```{r, message = FALSE}
+create_unit_histogram(products_lb, lb, 2, color = "brown1") +
+  labs(title = "Amount of Products Purchased by Price per Pound",
+       x  = "Price per Pound ($)",
+       y = "Total Quantity of Product Purchased"
+       )
+```
+
+Looking at the boxplot and quantile information for the products themselves indicates that half of the products available have a price per pound below $0.97, and it seems to ring true--about half of the purchases are concentrated below that value, but the other half is spread across a wide range, based on our boxplot above.
+
+Let's see if there's any trends based on demographics:
+
+```{r, message = FALSE}
+create_unit_histogram(products_lb, lb, 2, color = "brown1") +
+    labs(title = "Amount of Products Purchased by Price per Pound", 
+       subtitle = "Separated by Household Size",
+       x  = "Price per Pound ($)",
+       y = "Quantity of Product Purchased"
+       ) +
+    facet_wrap(~ household_size)
+```
+```{r, message = FALSE}
+create_unit_histogram(products_lb, lb, 2, color = "brown1") +
+    labs(title = "Amount of Products Purchased by Price per Pound", 
+       subtitle = "Separated by Income",
+       x  = "Price per Pound ($)",
+       y = "Quantity of Product Purchased"
+       ) +
+    facet_wrap(~ income)
+```
+
+Both of these distributions indicate no clear difference in preference between household sizes or income ranges; the differences in amount likely indicates there are more households in certain household sizes or income ranges over the others. Generally, though, most people prefer those lower prices per pound. 
+
+Now let's look at average sales value based on price per pound.
+
+```{r, message = FALSE}
+create_avg_sv_scatter(products_lb, 2) +
+  labs(title = "Average Sales Value by Price Per Pound",
+       x = "Price Per Pound ($)",
+       y = "Average Sales Value ($)")
+```
+
+The peak below 0.5 is surprising, as it indicates a high general price but low price per pound. These may be bulk products, and we should look for a similar peak in the total sales to see if there's a lot of sales from these products, as it isn't entirely clear from the histogram if there are a lot of purchases for this price per count.
+
+```{r, message = FALSE}
+create_total_sv_scatter(products_lb, 2) +
+  labs(title = "Total Sales Value by Price per Pound",
+       x = "Price Per Pound ($)",
+       y = "Total Sales Value ($)")
+```
+
+There's still a peak here at that same price per pound, but it's not as significant as expected. In addition, the trend's increase on the right half of the graph, coupled with the high average sales value but somewhat low purchases indicates rising prices that are not mirrored by many purchases. As a result, this indicates a general preference for lower/mid-range prices. Finally, let's look at the products distribution. 
+
+```{r}
+create_products_scatter(products_lb, 2) +
+  labs(title = "Quantity of Products by Price Per Pound",
+       x = "Price Per Pound ($)",
+       y = "Quantity of Products")
+```
+
+Similarly to the count distribution, the amount of products for each price per pound is similar across the board, which indicates that our trends aren't heavily affected by the number of products at each price per pound.
+
+Overall, for products measured in pounds, although the total sales of more expensive products is a bit higher than less expensive products, focusing on those products with prices per pound around 0.3 and 0.75 might end up being more successful with how often they are purchased.
+
+### Ounces {.tabset}
+
+#### Overall
+
+Finally, let's look at ounces.
+
+
+First, let's create a histogram for all products measured in ounces:
+```{r, message = FALSE}
+create_unit_histogram(products_oz, oz, color = "lightcyan4") +
+    labs(title = "Amount of Products Purchased by Price per Ounce", 
+       x  = "Price per Ounce ($)",
+       y = "Quantity of Product Purchased"
+       )
+```
+
+This initial distribution is different than the initial distributions for pound and count. Let's look at the boxplot and quantile information:
+
+```{r, warning = FALSE, message = FALSE}
+create_unit_boxplot(products_oz, color = "lightcyan4") +
+  labs(title = "Distribution of Products' Price Per Ounce",
+       x = "Price Per Ounce ($)")
+```
+Interesting. Clearly, there is very large overall range of prices for products measured in ounces. This is so spread out that it's hard to even tell what the range between the first and third quantile is--is it significantly close to 0, or does it extend somewhat?
+
+```{r, message = FALSE}
+find_unit_quantiles(products_oz)
+```
+Woah, this is wildly different than the other distributions. Let's make a new histogram with max price of 0.35.
+
+```{r, message = FALSE}
+create_unit_histogram(products_oz, oz, 0.35, "lightcyan4") +
+  labs(title = "Amount of Products Purchased by Price per Ounce", 
+       x  = "Price per Ounce ($)",
+       y = "Quantity of Product Purchased"
+       ) 
+```
+Similarly to the count distribution, there's a clear preference here for lower price-per-ounce products. Let's see if there's demographic differences: 
+
+```{r, message = FALSE}
+create_unit_histogram(products_oz, oz, 0.35, "lightcyan4") +
+  labs(title = "Amount of Products Purchased by Price per Ounce",
+       subtitle = "Separated by Income Range",
+       x  = "Price per Ounce ($)",
+       y = "Quantity of Product Purchased"
+       ) +
+  facet_wrap(~income)
+```
+
+```{r, message = FALSE}
+create_unit_histogram(products_oz, oz, 0.35, "lightcyan4") +
+  labs(title = "Amount of Products Purchased by Price per Ounce",
+       subtitle = "Separated by Household Size",
+       x  = "Price per Ounce ($)",
+       y = "Quantity of Product Purchased"
+       ) +
+  facet_wrap(~household_size)
+```
+
+Like the others, there's no clear difference here that couldn't be explained by a larger number of households in the sections with more purchases. Let's look at average and total sales values.
+
+```{r, message = FALSE}
+create_avg_sv_scatter(products_oz, 0.35) +
+  labs(title = "Average Sales Value by Price per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Average Sales Value ($)")
+
+```
+
+Not many conclusions to draw here. Let's look at total sales.
+
+```{r, message = FALSE}
+create_total_sv_scatter(products_oz, 0.35) +
+  labs(title = "Total Sales Value by Price per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Total Sales Value ($)")
+```
+
+We could say there's a slight decrease in total sales as price per ounce increases, but it's not clear enough to be certain. Let's examine a couple product categories to see if we can find any trends.
+
+#### Beer
+First, we'll find our quantiles and do a histogram.
+```{r, message = FALSE}
+find_category_quantiles(products_oz, "BEER")
+create_category_histogram(products_oz, "BEER", 0.8, color = "lightcyan4") +
+  labs(title = "Packs of Beer Purchased by Price Per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Packs of Beer Purchased")
+```
+
+Now, let's find average and total sales values.
+
+```{r, message = FALSE}
+products_oz %>%
+  filter(str_detect(product_category, regex("BEER"))) %>%
+  inner_join(transactions) %>%
+  mutate(price_per_oz = (sales_value / quantity / package_size)) %>%
+  group_by(product_id) %>%
+  mutate(avg_ppo = mean(price_per_oz)) %>%
+  filter(avg_ppo < 0.8) %>%
+  group_by(avg_ppo, product_id) %>%
+  mutate(avg_sales_value = mean(sales_value)) %>%
+  ggplot(aes(x = avg_ppo, y = avg_sales_value)) +
+  geom_point(alpha = 0.05) +
+  labs(title = "Average Sales Value by Price per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Average Sales Value ($)") +
+  geom_smooth()
+```
+
+There's a clear increase in average sales value as price per ounce increases, but its almost linear trend indicates it may be because of the increase in price per ounce.
+
+```{r, message = FALSE}
+products_oz %>%
+  filter(str_detect(product_category, regex("BEER"))) %>%
+  inner_join(transactions) %>%
+  mutate(price_per_oz = (sales_value / quantity / package_size)) %>%
+  group_by(product_id) %>%
+  mutate(avg_ppo = mean(price_per_oz)) %>%
+  filter(avg_ppo < 0.8) %>%
+  group_by(avg_ppo, product_id) %>%
+  mutate(total_sales_value = sum(sales_value)) %>%
+  ggplot(aes(x = avg_ppo, y = total_sales_value)) +
+  geom_point(alpha = 0.05) +
+  labs(title = "Total Sales Value by Price per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Total Sales Value ($)") +
+  geom_smooth()
+```
+
+This gives us some great data. There's a clear preference for a few different price points, especially around 0.65, 0.4, and 0.55 dollars per ounce. Although the average sales value grows up to those points, the increase in total sales value is more significant than the change in average sales value. Generally, it seems like more expensive beer is preferred. Let's make sure this is true by looking at an overall beer scatterplot.
+
+```{r, message = FALSE}
+products_oz %>%
+  filter(str_detect(product_category, regex("BEER"))) %>%
+  inner_join(transactions) %>%
+  mutate(price_per_unit = (sales_value / quantity / package_size)) %>%
+  filter(price_per_unit <= 0.8) %>%
+  ggplot(aes(x = price_per_unit, y = quantity)) +
+  geom_point(alpha = 0.05) +
+  labs(title = "Quantity of Beer Products Sold By Price Per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Quantity of Beer Products")
+
+```
+
+Even though there's not many beer products sold at a price per ounce of 0.65 and above, a lot of purchases and total sales come from that amount. In conclusion, more expensive beer is enjoyed by buyers just as much as inexpensive/regular beer, but it brings in a lot more sales.
+
+#### Bread
+A classic food, bread should give us some great data. First, quantiles and histogram.
+```{r, message = FALSE}
+find_category_quantiles(products_oz, "BREAD")
+create_category_histogram(products_oz, "BREAD", 0.15, color = "lightcyan4") +
+  labs(title = "Quantity of Bread Purchased By Price Per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Quantity of Bread Purchased")
+```
+
+Interesting. Bread purchases are preferred in the middle range. What about average and total sales?
+
+```{r, message = FALSE}
+products_oz %>%
+  filter(str_detect(product_category, regex("BREAD"))) %>%
+  inner_join(transactions) %>%
+  mutate(price_per_oz = (sales_value / quantity / package_size)) %>%
+  group_by(product_id) %>%
+  mutate(avg_ppo = mean(price_per_oz)) %>%
+  filter(avg_ppo < 0.15) %>%
+  group_by(avg_ppo, product_id) %>%
+  mutate(avg_sales_value = mean(sales_value)) %>%
+  ggplot(aes(x = avg_ppo, y = avg_sales_value)) +
+  geom_point(alpha = 0.05) +
+  labs(title = "Average Sales Value by Price per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Average Sales Value ($)") +
+  geom_smooth()
+```
+
+This tells us more information about the bread purchases. In general, higher price per ounce leads to higher overall price for bread. Let's look at total sales.
+
+```{r, message = FALSE}
+products_oz %>%
+  filter(str_detect(product_category, regex("BREAD"))) %>%
+  inner_join(transactions) %>%
+  mutate(price_per_oz = (sales_value / quantity / package_size)) %>%
+  group_by(product_id) %>%
+  mutate(avg_ppo = mean(price_per_oz)) %>%
+  filter(avg_ppo < 0.15) %>%
+  group_by(avg_ppo, product_id) %>%
+  mutate(total_sales_value = sum(sales_value)) %>%
+  ggplot(aes(x = avg_ppo, y = total_sales_value)) +
+  geom_point(alpha = 0.05) +
+  labs(title = "Total Sales Value by Price per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Total Sales Value ($)") +
+  geom_smooth()
+```
+
+Well, a couple of bread products are really popular! Let's filter this a bit to get a better trend idea.
+
+```{r, message = FALSE}
+products_oz %>%
+  filter(str_detect(product_category, regex("BREAD"))) %>%
+  inner_join(transactions) %>%
+  mutate(price_per_oz = (sales_value / quantity / package_size)) %>%
+  group_by(product_id) %>%
+  mutate(avg_ppo = mean(price_per_oz)) %>%
+  filter(avg_ppo < 0.15) %>%
+  group_by(avg_ppo, product_id) %>%
+  mutate(total_sales_value = sum(sales_value)) %>%
+  filter(total_sales_value < 1450) %>%
+  ggplot(aes(x = avg_ppo, y = total_sales_value)) +
+  geom_point(alpha = 0.05) +
+  labs(title = "Total Sales Value by Price per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Total Sales Value ($)") +
+  geom_smooth()
+```
+
+Even without those major outliers, our graph looks pretty similar. Even though average sales value of bread products around 0.05 dollars per ounce is relatively low, the total sales of those bread products is sky high. The 0.10 and 0.14 are not as significant because of their higher average sales values, but it's still good to see. Let's finally check the overall distribution to corroborate our findings.
+
+```{r}
+products_oz %>%
+  filter(str_detect(product_category, regex("BREAD"))) %>%
+  inner_join(transactions) %>%
+  mutate(price_per_unit = (sales_value / quantity / package_size)) %>%
+  filter(price_per_unit <= 0.14) %>%
+  ggplot(aes(x = price_per_unit, y = quantity)) +
+  geom_point(alpha = 0.05) +
+  labs(title = "Quantity of Bread Products Sold By Price Per Ounce",
+       x = "Price Per Ounce ($)",
+       y = "Quantity of Bread Products")
+```
+
+Looking at this, a bit of those peaks could be explained by the extra number of products at those prices, but generally those peaks were significant enough to warrant acknowledgement.
+
+Overall, 0.06 and 0.10 dollars per ounce are the perfect prices for bread purchases. Increasing the availability of bread at these prices could be very effective.
+
+
+## Conclusion/Summary
+
+When considering growth opportunities for Regork, we wanted to analyze how product pricing affects customers' purchasing behavior. We analyzed this by using products, transactions, and demographics data from the Complete Journey data set, and we looked at overall purchases, average sales values, and total sales values based on price per unit. With this, we found a narrative that was sometimes clear (as in the case of products measured by count) and other times not necessarily meaningful (as in the case of products measured by ounces overall). Interestingly, there did not appear to be significant differences in preferences based on demographics.
+
+Overall, we propose a focus on increasing availability of low price per count and price per ounce products as well as mid-range price per pound products. We also suggest more in-depth, category-based analysis, especially for products measured in ounces, in order to get a more complete analysis. 
+
+There are some limitations to this analysis. Most notably, perhaps, is the expectation that there are products within the same measurement categories with wildly different expected prices. We tried to combat this by taking the average price per unit by product in order to not have one heavily-purchased product skew the data as well as only taking the first three quartiles of data when creating our new distributions. With more time or more data mining power, though, each product category could/should be considered individually to get more accurate data. This is especially important for products measured in ounces, as there are over 40,000 products in that category.
+
